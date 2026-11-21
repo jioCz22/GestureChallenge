@@ -2,6 +2,7 @@
 
 /* =========================================================
    GESTURECHALLENGE — MOTOR PRINCIPAL
+   (versión mejorada: detección 3D, suavizado y guía al usuario)
 ========================================================= */
 
 /* 1. CONFIGURACIÓN */
@@ -22,16 +23,23 @@ let stream = null, camOn = false;
 let lm = null, MP = null, du = null;
 let det = 0, lastT = 0, hand = false, actx = null;
 let detErr = 0, useCPU = false, lastVT = -1, drawn = false, wake = null;
+let onLearn = true;
 const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+const DEBUG = /debug/i.test(location.hash);   /* añade #debug a la URL para ver los valores internos */
 
 
 /* 2. VALIDACIÓN DE DATA.JS */
 function validateData() {
-  const required = ["LEVELS", "STAGES", "STAGE_LV", "RES", "ALL", "BADGES"];
-  const missing = required.filter(name => typeof window[name] !== "undefined" ? false : (() => {
-    try { return eval(`typeof ${name} === "undefined"`); }
-    catch { return true; }
-  })());
+  const present = {
+    LEVELS: typeof LEVELS !== "undefined",
+    STAGES: typeof STAGES !== "undefined",
+    STAGE_LV: typeof STAGE_LV !== "undefined",
+    RES: typeof RES !== "undefined",
+    ALL: typeof ALL !== "undefined",
+    BADGES: typeof BADGES !== "undefined",
+    SHAPES: typeof SHAPES !== "undefined"
+  };
+  const missing = Object.keys(present).filter(name => !present[name]);
 
   if (missing.length) {
     document.body.innerHTML = `
@@ -64,8 +72,6 @@ function validateData() {
     if (!Number.isInteger(level.stage) || !STAGES[level.stage])
       throw new Error(`Etapa inválida en el nivel ${i + 1}.`);
   });
-
-  console.info("Data.js validado correctamente.");
 }
 
 
@@ -106,6 +112,10 @@ function save() {
     toast("No se pudo guardar el progreso.");
   }
 }
+
+/* Fecha LOCAL (antes se usaba UTC y la racha fallaba por la noche en México) */
+const dayKey = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
 
 /* 4. UTILIDADES */
@@ -175,6 +185,7 @@ function beep(frequency = 650) {
   navigator.vibrate?.(frequency >= 800 ? 40 : 15);
   try {
     actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === "suspended") actx.resume();
     const osc = actx.createOscillator();
     const gain = actx.createGain();
     osc.frequency.value = frequency;
@@ -196,6 +207,19 @@ function fb(message, color = "") {
   if (el.className !== cls) el.className = cls;
 }
 
+/* Precarga las imágenes del nivel para que el cambio de letra sea instantáneo */
+const preloaded = new Set();
+function preload(keys) {
+  keys.forEach(key => {
+    const src = RES[key]?.img;
+    if (!src || preloaded.has(src)) return;
+    preloaded.add(src);
+    const img = new Image();
+    img.decoding = "async";
+    img.src = src;
+  });
+}
+
 
 /* 5. REFERENCIAS VISUALES */
 function refHTML(key) {
@@ -210,7 +234,7 @@ function refHTML(key) {
   if (resource.img) {
     return `
       <img src="${esc(resource.img)}" alt="Referencia de ${esc(key)}"
-        loading="lazy"
+        decoding="async"
         onerror="this.style.display='none';this.nextElementSibling.hidden=false">
       <div class="empty" hidden>No se pudo cargar la imagen de ${esc(key)}.</div>`;
   }
@@ -323,7 +347,7 @@ function renderBase() {
   const canPractice = level.type !== "phrases" || hasRef(item);
   $("startBtn").hidden = phase === "run" || phase === "eval";
   $("startBtn").disabled = !canPractice;
-  
+
   $("evalBox").hidden = phase !== "eval";
   $("quizBtn").hidden = level.type !== "letters";
 
@@ -386,6 +410,10 @@ function selectLevel(number) {
   const level = L(number);
   idx = level.items.findIndex(item => !isDone(level, item));
   if (idx < 0) idx = 0;
+
+  preload(level.type === "words"
+    ? [...new Set(level.items.flatMap(spell))]
+    : level.items);
 
   fb("Pulsa «Iniciar nivel» para comenzar.");
   renderLevels();
@@ -502,8 +530,10 @@ function completeBase() {
   if (level.type === "letters")
     data.mastery[item] = Math.min(100, (data.mastery[item] || 0) + 34);
 
-  const today = new Date().toISOString().slice(0, 10);
-  const yesterday = new Date(Date.now() - 864e5).toISOString().slice(0, 10);
+  const today = dayKey();
+  const yest = new Date();
+  yest.setDate(yest.getDate() - 1);
+  const yesterday = dayKey(yest);
 
   if (data.lastDay !== today) {
     data.streak = data.lastDay === yesterday ? data.streak + 1 : 1;
@@ -720,6 +750,7 @@ async function camStart() {
     await video.play();
     syncAspect();
 
+    smoother.reset();
     camOn = true;
     setCamUI(true);
     toast("Cámara activada");
@@ -765,7 +796,10 @@ async function startLMBase() {
       const make = delegate => MP.HandLandmarker.createFromOptions(fileset, {
         baseOptions: { modelAssetPath: MODEL_URL, delegate },
         runningMode: "VIDEO",
-        numHands: 1
+        numHands: 1,
+        minHandDetectionConfidence: 0.5,
+        minHandPresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5
       });
 
       /* La GPU hace la detección mucho más fluida; si falla, cae a CPU */
@@ -791,6 +825,7 @@ async function startLMBase() {
     du = null;
     lastT = 0;
     lastVT = -1;
+    smoother.reset();
     cancelAnimationFrame(det);
     det = requestAnimationFrame(loop);
   }
@@ -803,9 +838,10 @@ function loop() {
 
   const now = performance.now();
   const video = $("camera");
-  const gap = auto ? 66 : 120;               /* ~15 fps en práctica, ~8 en reposo */
+  const gap = auto ? 45 : 110;               /* ~22 fps en práctica, ~9 en reposo */
 
-  if (document.hidden || now - lastT < gap || video.readyState < 2 || !video.videoWidth) return;
+  /* No gastar batería si no se ve la cámara (otra pestaña/sección) */
+  if (document.hidden || !onLearn || now - lastT < gap || video.readyState < 2 || !video.videoWidth) return;
   if (video.currentTime === lastVT) return;  /* mismo fotograma: no repetir trabajo */
 
   lastT = now;
@@ -838,18 +874,23 @@ function loop() {
     return;
   }
 
-  hand = result.landmarks.length > 0;
-  const points = hand ? result.landmarks[0] : null;
-  window.GC_LAST_LANDMARKS = points;
+  const raw = result.landmarks?.[0] || null;
+  const rawWorld = result.worldLandmarks?.[0] || null;
+  const aspect = video.videoWidth / video.videoHeight;
 
-  if (auto && phase === "auto") autoTick(points, now);
+  hand = !!raw;
+  window.GC_LAST_LANDMARKS = raw;
+
+  /* Los puntos suavizados se usan para clasificar; los crudos, para dibujar */
+  const sm = raw ? smoother.push(raw, rawWorld, aspect, now) : null;
+  if (auto && phase === "auto") autoTick(sm, now, aspect);
 
   if (drawn) { ctx.clearRect(0, 0, canvas.width, canvas.height); drawn = false; }
 
-  if (points && data.overlay !== false) {
+  if (raw && data.overlay !== false) {
     du = du || new MP.DrawingUtils(ctx);
-    du.drawConnectors(points, MP.HandLandmarker.HAND_CONNECTIONS, { color: "#7dd3fc", lineWidth: 3 });
-    du.drawLandmarks(points, { color: "#fff", radius: 3 });
+    du.drawConnectors(raw, MP.HandLandmarker.HAND_CONNECTIONS, { color: "#7dd3fc", lineWidth: 3 });
+    du.drawLandmarks(raw, { color: "#fff", radius: 3 });
     drawn = true;
   }
 
@@ -924,7 +965,8 @@ function view(section) {
     if (on) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
   });
   ["learn", "stats", "guide"].forEach(n => $("view-" + n).classList.toggle("active", n === section));
-  if (section !== "learn" && ["run", "eval", "auto"].includes(phase)) {
+  onLearn = section === "learn";
+  if (!onLearn && ["run", "eval", "auto"].includes(phase)) {
     reset(); fb("Práctica pausada al cambiar de sección.", "warn"); render();
   }
   if (section === "stats") renderStats();
@@ -1026,6 +1068,7 @@ function bindEvents() {
 
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && camOn) keepAwake(true);
+    if (document.hidden) held = 0;
     if (document.hidden && (phase === "run" || phase === "eval")) {
       reset();
       fb("Práctica pausada porque saliste de la pestaña.", "warn");
@@ -1033,7 +1076,7 @@ function bindEvents() {
     }
   });
 
-  window.addEventListener("beforeunload", () => {
+  window.addEventListener("pagehide", () => {
     stopClock();
     camStop();
   });
@@ -1061,16 +1104,172 @@ function init() {
 
   selectLevel(nextLevel);
   renderStats();
-
-  console.info("GestureChallenge iniciado correctamente.");
 }
 
+
 /* =========================================================
-   20. MODO AUTÓNOMO (detección geométrica local con landmarks)
+   20. MOTOR DE DETECCIÓN (geometría 3D local con landmarks)
 ========================================================= */
-let needBreak = false, auto = false, stuck = false, holdStart = 0, lastMatch = 0, cool = 0, since = 0, trail = [], queue = [], qi = 0, nextT = null;
+
+/* ==DETECTOR-START== */
+/*
+  Qué cambió respecto a la versión anterior:
+  - Usa las coordenadas 3D "world" de MediaPipe (en metros): los ángulos
+    de los dedos ya no dependen de la distancia a la cámara ni de si la
+    mano está inclinada.
+  - Corrige la deformación por proporción de pantalla (4:3 / vertical).
+  - Cada dedo tiene un "curl" continuo (0 = recto, 1 = cerrado) con bandas
+    de tolerancia, en vez de cortes duros 0/1/2 que oscilaban.
+  - El pulgar se mide con la posición lateral respecto a la palma
+    (distingue A de S/T) y funciona igual con mano izquierda o derecha.
+  - Se calcula el costo de TODAS las letras: la letra pedida solo se acepta
+    si encaja y no hay otra letra claramente mejor (evita falsos positivos).
+  - Las letras con reglas idénticas (A/S/T, M/N, R/U…) se aceptan entre sí:
+    la geometría de una sola mano no puede separarlas.
+*/
+const GCDetector = (() => {
+  const RAD = 180 / Math.PI;
+  const FINGERS = [[5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20]];
+  const clamp = (v, a = 0, b = 1) => v < a ? a : v > b ? b : v;
+  const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: (a.z || 0) - (b.z || 0) });
+  const len = v => Math.hypot(v.x, v.y, v.z);
+  const dot = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
+  const dist3 = (a, b) => len(sub(a, b));
+  const angleBetween = (u, v) =>
+    Math.acos(clamp(dot(u, v) / ((len(u) * len(v)) || 1e-9), -1, 1)) * RAD;
+
+  /* Bandas aceptadas de curl: 1 = extendido, 0 = doblado, 2 = a medias */
+  const BANDS = { 1: [0, 0.3], 0: [0.68, 1], 2: [0.22, 0.92] };
+  const W_FINGER = 1, W_THUMB = 0.7, W_ORI = 0.8, W_SPREAD = 0.8;
+
+  function features(p, w, aspect) {
+    const P = dist3(w[0], w[9]) || 1e-6;                 /* largo de la palma (m) */
+
+    /* Curl por dedo: suma de flexiones MCP + PIP + DIP */
+    const curl = FINGERS.map(([m, a, b, t]) => {
+      const meta = sub(w[m], w[0]);
+      const s1 = sub(w[a], w[m]), s2 = sub(w[b], w[a]), s3 = sub(w[t], w[b]);
+      return clamp((angleBetween(meta, s1) + angleBetween(s1, s2) + angleBetween(s2, s3)) / 220);
+    });
+    const cls = curl.map(c => c < 0.26 ? 1 : c > 0.75 ? 0 : 2);
+
+    /* Pulgar: posición lateral respecto al índice sobre el eje índice→meñique */
+    const axV = sub(w[17], w[5]);
+    const ax = { x: axV.x / (len(axV) || 1e-9), y: axV.y / (len(axV) || 1e-9), z: axV.z / (len(axV) || 1e-9) };
+    const tv = sub(w[4], w[5]);
+    const tx = dot(tv, ax) / P;                           /* negativo = pulgar por fuera de la palma */
+    const tOut = len(tv) / P;
+    const sep = clamp(0.7 * clamp(-tx / 0.25) + 0.3 * clamp((tOut - 0.55) / 0.35));
+    const pinch = dist3(w[4], w[8]) / P;                  /* pulgar tocando la punta del índice */
+
+    /* Orientación de la mano en la imagen (corrigiendo la proporción) */
+    const dx = (p[9].x - p[0].x) * aspect, dy = p[9].y - p[0].y;
+    const ang = Math.atan2(-dy, dx) * RAD;                /* 90 = arriba, -90 = abajo */
+    const palmImg = Math.hypot(dx, dy);
+
+    /* Apertura entre índice y medio */
+    const spread = angleBetween(sub(w[8], w[5]), sub(w[12], w[9]));
+
+    return { P, curl, cls, tx, tOut, sep, pinch, ang, palmImg, spread,
+             thumb: pinch < 0.35 && curl[0] > 0.08 ? 2 : sep >= 0.4 ? 1 : 0,
+             ori: ang > 45 && ang < 135 ? "up" : ang < -45 && ang > -135 ? "down" : "side" };
+  }
+
+  const fingerCost = (c, code) => {
+    const [lo, hi] = BANDS[code] || BANDS[2];
+    return clamp((c < lo ? lo - c : c > hi ? c - hi : 0) / 0.3);
+  };
+
+  const thumbCost = (f, code) => code === 1 ? clamp((0.3 - f.sep) / 0.3)
+    : code === 0 ? clamp((f.sep - 0.5) / 0.4)
+    : clamp((f.pinch - 0.3) / 0.35);
+
+  const angDiff = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
+  const oriCost = (ang, o) => {
+    const err = o === "up" ? angDiff(ang, 90)
+      : o === "down" ? angDiff(ang, -90)
+      : Math.min(angDiff(ang, 0), angDiff(ang, 180));
+    return clamp((err - 35) / 30);
+  };
+
+  const spreadCost = (deg, sp) => sp === "apart" ? clamp((18 - deg) / 12) : clamp((deg - 12) / 12);
+
+  function cost(rule, f) {
+    let c = 0;
+    rule.f.forEach((v, i) => {
+      if (v === -1) return;
+      c += W_FINGER * Math.min(...[].concat(v).map(code => fingerCost(f.curl[i], code)));
+    });
+    const th = [].concat(rule.th ?? -1);
+    if (!th.includes(-1)) c += W_THUMB * Math.min(...th.map(code => thumbCost(f, code)));
+    const o = [].concat(rule.o || "any");
+    if (!o.includes("any")) c += W_ORI * Math.min(...o.map(x => oriCost(f.ang, x)));
+    if (rule.sp) c += W_SPREAD * spreadCost(f.spread, rule.sp);
+    return c;
+  }
+
+  /* tol: 0 = estricta, 0.5 = normal, 1 = flexible (mismo ajuste de la pantalla de ajustes) */
+  function classify(f, shapes, tol, target) {
+    const t = clamp(Number.isFinite(tol) ? tol : 0.5);
+    const thr = 0.45 + 0.65 * t;
+    const margin = 0.05 + 0.35 * t;
+    const costs = {};
+    let bestCost = Infinity;
+
+    for (const letter in shapes) {
+      const c = cost(shapes[letter], f);
+      costs[letter] = c;
+      if (c < bestCost) bestCost = c;
+    }
+    const list = Object.keys(costs).filter(k => costs[k] <= bestCost + 0.04).slice(0, 3);
+
+    let ok = false, mine = null;
+    if (target && costs[target] !== undefined) {
+      mine = costs[target];
+      let other = Infinity;
+      for (const k in costs) if (k !== target && costs[k] < other) other = costs[k];
+      const moving = !!shapes[target].mv;     /* en las letras con movimiento la forma varía más */
+      ok = mine <= thr * (moving ? 1.2 : 1) && (moving || mine <= other + margin);
+    }
+    return { ok, list, bestCost, cost: mine, thr };
+  }
+
+  /* Suavizado exponencial; se reinicia si la mano desaparece un instante */
+  function createSmoother(alpha = 0.55, gapMs = 250) {
+    let sp = null, sw = null, seen = 0;
+    const copy = q => ({ x: q.x, y: q.y, z: q.z || 0 });
+    const blend = (prev, cur) => cur.map((q, i) => {
+      const o = prev[i];
+      return { x: o.x + (q.x - o.x) * alpha, y: o.y + (q.y - o.y) * alpha, z: o.z + ((q.z || 0) - o.z) * alpha };
+    });
+    return {
+      push(p, w, aspect, now) {
+        /* Si no hay coordenadas 3D reales se aproximan con las de la imagen */
+        const ww = w || p.map(q => ({ x: q.x * aspect, y: q.y, z: (q.z || 0) * aspect }));
+        if (!sp || now - seen > gapMs) { sp = p.map(copy); sw = ww.map(copy); }
+        else { sp = blend(sp, p); sw = blend(sw, ww); }
+        seen = now;
+        return { p: sp, w: sw };
+      },
+      reset() { sp = sw = null; seen = 0; }
+    };
+  }
+
+  function describe(f) {
+    const n = ["Índ", "Med", "Anu", "Meñ"], sym = ["↓", "↑", "~"];
+    return f.cls.map((v, i) => n[i] + sym[v] + Math.round(f.curl[i] * 100)).join(" ") +
+      ` · pulgar ${["pegado", "fuera", "pinza"][f.thumb]} (${Math.round(f.sep * 100)}) · ${f.ori} · sep ${Math.round(f.spread)}°`;
+  }
+
+  return { features, classify, createSmoother, describe };
+})();
+/* ==DETECTOR-END== */
+
+let needBreak = false, auto = false, stuck = false, held = 0, cool = 0, since = 0;
+let trail = [], queue = [], qi = 0, nextT = null;
+let lastTick = 0, movedUntil = 0, coachMsg = "";
+const smoother = GCDetector.createSmoother();
 const playable = l => l.items.some(i => (l.type === "words" ? spell(i) : [i]).some(hasRef));
-const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 let hbarV = -1;
 const hbar = p => {
   const v = Math.round(p * 50);
@@ -1080,7 +1279,11 @@ const hbar = p => {
   if (e) e.style.transform = `scaleX(${v / 50})`;
 };
 
-function reset() { resetBase(); auto = false; stuck = false; holdStart = 0; trail = []; clearTimeout(nextT); hbar(0); }
+function reset() {
+  resetBase();
+  auto = false; stuck = false; held = 0; trail = []; movedUntil = 0; coachMsg = "";
+  clearTimeout(nextT); hbar(0);
+}
 
 function render() {
   renderBase();
@@ -1096,67 +1299,90 @@ function render() {
   updateCamState();
 }
 
-function shapeOf(p) {
-  const P = dist(p[0], p[9]) || 1e-6;
-  const f = [[8, 5], [12, 9], [16, 13], [20, 17]].map(([t, m]) => {
-    const r = dist(p[t], p[0]) / dist(p[m], p[0]);
-    return r > 1.65 ? 1 : r < 1.3 ? 0 : 2;
-  });
-  const th = f[0] !== 0 && dist(p[4], p[8]) / P < .35 ? 2 : dist(p[4], p[5]) / P > .8 ? 1 : 0;
-  const dx = p[9].x - p[0].x, dy = p[9].y - p[0].y;
-  const o = Math.abs(dx) > Math.abs(dy) ? "side" : dy < 0 ? "up" : "down";
-  const g = dist(p[8], p[12]) / P;
-  return { f, th, o, sp: g > .5 ? "apart" : g < .35 ? "together" : "mid", P };
+/* Mensajes de ayuda, solo cuando cambian y tras unos segundos sin éxito */
+function setCoach(msg, now) {
+  if (msg === coachMsg) return;
+  if (!msg || now - since > 2500) {
+    coachMsg = msg;
+    fb(msg || `Haz la seña que se muestra y mantenla: ${cur()}`, msg ? "warn" : "");
+  }
 }
 
-function matchShape(letter, s) {
-  const t = SHAPES[letter]; let bad = 0;
-  t.f.forEach((v, i) => { if (v >= 0 && s.f[i] !== v) bad += (s.f[i] === 2 || v === 2) ? .5 : 1; });
-  if (t.th >= 0 && t.th !== s.th) bad += .5;
-  if (t.o && t.o !== "any" && t.o !== s.o) bad += 1;
-  if (t.sp && s.sp !== "mid" && t.sp !== s.sp) bad += 1;
-  return bad <= (data.tol ?? TOL);
+function coachFor(f, p) {
+  if (f.palmImg < 0.1) return "Acerca un poco la mano a la cámara.";
+  if (p.some(q => q.x < 0.01 || q.x > 0.99 || q.y < 0.01 || q.y > 0.99))
+    return "Aleja un poco la mano: se sale del cuadro.";
+  return "";
 }
 
-function movedEnough(letter, p, now, P) {
-  const t = SHAPES[letter]; if (!t.mv) return true;
-  trail.push({ x: p[t.mv].x, y: p[t.mv].y, t: now });
+/* Movimiento: extensión del recorrido de la punta en la última 1.5 s (resistente al temblor) */
+function updateMotion(point, now, palm) {
+  trail.push({ x: point.x, y: point.y, t: now });
   while (trail.length && now - trail[0].t > 1500) trail.shift();
-  let len = 0; for (let i = 1; i < trail.length; i++) len += dist(trail[i], trail[i - 1]);
-  return len > .6 * P;
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const q of trail) {
+    if (q.x < x0) x0 = q.x; if (q.x > x1) x1 = q.x;
+    if (q.y < y0) y0 = q.y; if (q.y > y1) y1 = q.y;
+  }
+  if (Math.max(x1 - x0, y1 - y0) > 0.5 * palm) movedUntil = now + 700;
 }
 
-function describe(s) {
-  const n = ["Índ", "Med", "Anu", "Meñ"], sym = ["↓", "↑", "~"];
-  return "" + s.f.map((v, i) => n[i] + sym[v]).join(" ") + " · pulgar " + ["pegado", "fuera", "pinza"][s.th] + " · " + s.o;
-}
+function autoTick(sm, now, aspect) {
+  if (now < cool) { lastTick = 0; return; }
 
-function autoTick(p, now) {
-  if (now < cool) return;
-  const letter = steps()[step], t = SHAPES[letter];
-  if (!t) {
+  const letter = steps()[step], rule = SHAPES[letter];
+
+  if (!rule) {
     if (!stuck) { stuck = true; fb(`«${letter}» no tiene reglas automáticas (falta referencia). Hazla y pulsa «Lo conseguí».`, "warn"); render(); }
     return;
   }
-  if (!p) { holdStart = 0; trail = []; hbar(0); return; }
-  const s = shapeOf(p);
-  if (needBreak) { if (matchShape(letter, s)) return; needBreak = false; }
-  setText("handState", describe(s));
-  const moved = movedEnough(letter, p, now, s.P);
-  if (matchShape(letter, s) && moved) { lastMatch = now; holdStart = holdStart || now; }
-  else if (now - lastMatch > 250) holdStart = 0;
-  const need = t.mv ? 300 : (data.hold || HOLD_MS), pr = holdStart ? Math.min(1, (now - holdStart) / need) : 0;
+
+  const dt = lastTick ? Math.min(120, now - lastTick) : 0;
+  lastTick = now;
+  const need = rule.mv ? 300 : (data.hold || HOLD_MS);
+
+  if (!sm) {
+    held = Math.max(0, held - dt * 2);
+    trail = [];
+    hbar(held / need);
+    setText("handState", "Sin mano a la vista");
+    setCoach("No veo tu mano. Colócala dentro del cuadro y con buena luz.", now);
+    return;
+  }
+
+  const f = GCDetector.features(sm.p, sm.w, aspect);
+  const res = GCDetector.classify(f, SHAPES, data.tol ?? TOL, letter);
+
+  if (needBreak) { if (res.ok) return; needBreak = false; }
+
+  if (rule.mv) updateMotion({ x: sm.p[rule.mv].x * aspect, y: sm.p[rule.mv].y }, now, f.palmImg);
+  const moved = !rule.mv || now < movedUntil;
+
+  /* Texto de estado: qué letra cree ver la app */
+  const seen = res.bestCost <= res.thr + 0.3 ? "Detecto: " + res.list.join(" / ") : "Forma no reconocida";
+  setText("handState", DEBUG ? `${seen} · ${describe(f)}` : seen);
+
+  /* Acumula tiempo con la seña correcta; si se pierde, decae al doble de rápido (tolera temblor) */
+  const match = res.ok && moved;
+  held = match ? held + dt : Math.max(0, held - dt * 2);
+  const pr = Math.min(1, held / need);
   hbar(pr);
-  if (pr >= 1) autoOk();
-  else if (now - since > 20000 && !stuck) {
+
+  if (pr >= 1) { autoOk(); return; }
+
+  setCoach(coachFor(f, sm.p), now);
+
+  if (now - since > 20000 && !stuck) {
     stuck = true;
     fb("¿No te detecta? Mejora la luz y el ángulo. Si tu seña coincide con la referencia, pulsa «Lo conseguí» (autoevaluación).", "warn");
     render();
   }
 }
 
+const describe = f => GCDetector.describe(f);
+
 function autoOk() {
-  holdStart = 0; trail = []; hbar(0);
+  held = 0; trail = []; movedUntil = 0; coachMsg = ""; lastTick = 0; hbar(0);
   cool = performance.now() + 1200; since = cool; stuck = false;
   const sp = steps();
   if (L(lv).type === "words" && step < sp.length - 1) { needBreak = sp[step + 1] === sp[step]; step++; beep(760); fb("¡Bien! Siguiente letra.", "ok"); render(); return; }
@@ -1192,7 +1418,7 @@ function evalNo() {
 }
 
 function stopAuto() {
-  auto = false; phase = "idle"; stuck = false; holdStart = 0; hbar(0); clearTimeout(nextT);
+  auto = false; phase = "idle"; stuck = false; held = 0; hbar(0); clearTimeout(nextT);
   fb("Nivel detenido. Pulsa «Iniciar nivel» para continuar."); render();
 }
 
@@ -1208,14 +1434,14 @@ async function startLevel() {
   reset();
   queue = l.items.filter(i => !isDone(l, i)); if (!queue.length) queue = [...l.items];
   qi = 0; idx = l.items.indexOf(queue[0]);
-  auto = true; phase = "auto"; since = performance.now() + 800; cool = since;
+  auto = true; phase = "auto"; since = performance.now() + 800; cool = since; lastTick = 0;
   if (narrow()) $("camBox").scrollIntoView({ behavior: "smooth", block: "center" });
   fb(`Haz la seña que se muestra y mantenla: ${queue[0]}`); render();
 }
 
 function camStop() {
   if (auto) { auto = false; phase = "idle"; fb("Cámara apagada: nivel en pausa.", "warn"); }
-  camStopBase(); hbar(0);
+  camStopBase(); hbar(0); smoother.reset(); held = 0;
 }
 
 let lmP = null;
@@ -1245,7 +1471,7 @@ function syncSettings() {
 }
 $("restartBtn").onclick = restartLevel;
 $("openSettings").addEventListener("click", syncSettings);
-$("optOverlay").onchange = e => { data.overlay = e.target.checked; save(); if (!data.overlay) { const c = $("overlay"); c.getContext("2d").clearRect(0, 0, c.width, c.height); } };
+$("optOverlay").onchange = e => { data.overlay = e.target.checked; save(); if (!data.overlay) { const c = $("overlay"); c.getContext("2d").clearRect(0, 0, c.width, c.height); drawn = false; } };
 $("optAutoNext").onchange = e => { data.autoNext = e.target.checked; save(); };
 $("optHold").onchange = e => { data.hold = Number(e.target.value); save(); toast("Tiempo de sostén actualizado"); };
 $("optTol").onchange = e => { data.tol = Number(e.target.value); save(); toast("Exigencia actualizada"); };
@@ -1257,7 +1483,7 @@ $("resetSettings").onclick = () => {
    Se actualiza cuando algo cambia (render, bucle de detección, cámara),
    ya no con un temporizador que corre todo el tiempo. */
 function updateCamState() {
-  const state = !camOn ? "off" : !hand ? "idle" : (auto && holdStart ? "hold" : "hand");
+  const state = !camOn ? "off" : !hand ? "idle" : (auto && held > 0 ? "hold" : "hand");
   const label = { off: "Cámara apagada", idle: auto ? "Buscando tu mano…" : "Cámara lista", hand: "Mano detectada", hold: "¡Mantén así!" }[state];
   const l = L(lv), it = cur(), sp = steps();
   const letter = l && it && l.type !== "phrases" ? sp[Math.min(step, sp.length - 1)] : "";
