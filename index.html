@@ -65,7 +65,7 @@
           <div class="sb-tiles">
             <div class="t-pts"><i class="si"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/></svg></i><b id="sbPoints">0</b><span>Puntos</span></div>
             <div class="t-streak"><i class="si"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c1 4 5 5 5 10a5 5 0 0 1-10 0c0-2 1-3 2-4 0 2 1 3 2 3 0-3-1-5 1-9z"/></svg></i><b id="sbStreak">0</b><span>Racha</span></div>
-            <div class="t-let"><i class="si"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/></svg></i><b id="sbLetters">0/27</b><span>Letras</span></div>
+            <div class="t-let"><i class="si"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/></svg></i><b id="sbLetters">0/26</b><span>Letras</span></div>
             <div class="t-lvl"><i class="si"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg></i><b id="sbLevels">0/15</b><span>Niveles</span></div>
           </div>
         </div>
@@ -86,9 +86,9 @@
           </div>
 
           <div class="howto" aria-label="Cómo funciona">
-            <div><b>1</b><span>Activa la cámara y pulsa «Iniciar nivel»</span></div>
-            <div><b>2</b><span>Haz la seña que se muestra y mantenla</span></div>
-            <div><b>3</b><span>La app avanza sola a la siguiente</span></div>
+            <div><b>1</b><span>Pulsa <strong>Iniciar nivel</strong> y acepta el permiso de la cámara</span></div>
+            <div><b>2</b><span>Pon tu mano frente a la cámara y haz la letra de la referencia</span></div>
+            <div><b>3</b><span>Mantén la posición: al salir ✓ pasa sola a la siguiente</span></div>
           </div>
 
           <!-- NIVELES -->
@@ -126,7 +126,7 @@
                   <p id="camTarget"></p>
                 </div>
 
-                <div class="panel ref-panel">
+                <div class="panel ref-panel" id="refPanel">
                   <div class="panel-heading">
                     <h3>Referencia visual</h3>
                   </div>
@@ -148,11 +148,19 @@
                 <div class="camera-box" id="camBox">
                   <video id="camera" autoplay playsinline muted style="display:none;"></video>
                   <canvas id="overlay"></canvas>
+                  <div class="hand-guide" id="handGuide" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V11m0-1.5V4a1.5 1.5 0 0 1 3 0v5.5m0-3a1.5 1.5 0 0 1 3 0V13m0-3.5a1.5 1.5 0 0 1 3 0V15a7 7 0 0 1-7 7h-1a7 7 0 0 1-5.6-2.8L4 15.5a1.5 1.5 0 0 1 2.4-1.8L8 15.5"/></svg>
+                    <span>Coloca tu mano aquí</span>
+                  </div>
+                  <div class="ref-float" id="refFloat" role="button" tabindex="0" title="Toca para ampliar o reducir la referencia" aria-label="Referencia de la seña. Toca para ampliar o reducir"></div>
                   <div class="cam-badge" id="camBadge">Cámara apagada</div>
                   <div class="cam-letter" id="camLetter"></div>
+                  <div class="cam-hint" id="camHint" aria-hidden="true"></div>
+                  <div class="cam-fx" id="camFx" aria-hidden="true"></div>
                   <div id="cameraEmpty">
-                    <strong>Cámara desactivada</strong>
-                    <p>Activa tu cámara para visualizar tu mano.</p>
+                    <strong>Tu cámara está apagada</strong>
+                    <p>Toca <b>Iniciar nivel</b> y acepta el permiso del navegador. Después coloca tu mano frente a la cámara.</p>
+                    <button class="primary-btn" id="camStart" type="button">▶ Iniciar nivel</button>
                   </div>
                 </div>
 
@@ -277,7 +285,7 @@
           <section class="panel guide-panel">
             <div class="panel-heading">
               <h3>Selecciona una letra</h3>
-              <span class="muted">27 letras</span>
+              <span class="muted" id="guideCount">26 letras</span>
             </div>
             <div class="alphabet-grid" id="alphabetGrid"></div>
             <div class="guide-detail" id="guideDetail">Selecciona una letra para consultar su información.</div>
@@ -314,10 +322,28 @@
     <label class="setting-row"><span>Exigencia de la detección<small>Estricta pide una forma más exacta</small></span><select id="optTol"><option value="0">Estricta</option><option value="0.5">Normal</option><option value="1">Flexible</option></select></label>
     <h4>APRENDIZAJE</h4>
     <label class="setting-row"><span>Sonido y vibración</span><input type="checkbox" id="soundToggle"></label>
+    <label class="setting-row"><span>Volumen de los sonidos<small>Sube el volumen si lo usas en un salón</small></span><select id="optVol"><option value="0.5">Suave</option><option value="0.9">Normal</option><option value="1.6">Fuerte</option></select></label>
     <label class="setting-row"><span>Pasar al siguiente nivel automáticamente<small>Al superar un nivel</small></span><input type="checkbox" id="optAutoNext"></label>
     <h4>DATOS</h4>
     <div class="camera-actions"><button class="secondary-btn" id="resetSettings" type="button">Restablecer ajustes</button><button class="danger-btn" id="clearProgress" type="button">Borrar todo mi progreso</button></div>
   </dialog>
+
+  <!-- NIVEL COMPLETADO -->
+  <div class="levelfx" id="levelFx" role="dialog" aria-modal="true" aria-labelledby="lfTitle" hidden>
+    <div class="lf-card">
+      <div class="lf-conf" id="lfConf" aria-hidden="true"></div>
+      <div class="lf-star" aria-hidden="true">★</div>
+      <h2 id="lfTitle">¡Nivel completado!</h2>
+      <p class="lf-name" id="lfName"></p>
+      <div class="lf-pts"><b id="lfPts">+0</b><span>puntos</span></div>
+      <p class="lf-next" id="lfNext"></p>
+      <div class="lf-actions">
+        <button class="primary-btn" id="lfGo" type="button">Siguiente nivel ▶</button>
+        <button class="secondary-btn" id="lfStay" type="button">Quedarme aquí</button>
+      </div>
+      <div class="lf-timer" id="lfTimer" aria-hidden="true"></div>
+    </div>
+  </div>
 
   <!-- NOTIFICACIONES -->
   <div id="toast" role="status" aria-live="polite"></div>
