@@ -2,7 +2,8 @@
 
 /* =========================================================
    GESTURECHALLENGE — MOTOR PRINCIPAL
-   (versión mejorada: detección 3D, suavizado y guía al usuario)
+   (detección 3D normalizada, confirmación por votos, guía al usuario,
+   sonidos, animaciones y referencia acoplada a la cámara en móvil)
 ========================================================= */
 
 /* 1. CONFIGURACIÓN */
@@ -13,7 +14,7 @@ const DEF = {
   done: [], best: 0, points: 0, levels: [],
   mastery: {}, words: [], phrases: [],
   streak: 0, lastDay: "", history: [],
-  badges: [], sound: true, landmarks: false, v2: 0
+  badges: [], sound: true, landmarks: false, v2: 0, v3: 0
 };
 
 let data, lv = 1, idx = 0, step = 0;
@@ -24,6 +25,7 @@ let lm = null, MP = null, du = null;
 let det = 0, lastT = 0, hand = false, actx = null;
 let detErr = 0, useCPU = false, lastVT = -1, drawn = false, wake = null;
 let onLearn = true;
+let lvGain = 0;   /* puntos ganados en el nivel actual (para la pantalla de nivel completado) */
 const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 const DEBUG = /debug/i.test(location.hash);   /* añade #debug a la URL para ver los valores internos */
 
@@ -56,8 +58,8 @@ function validateData() {
   if (!Array.isArray(LEVELS) || LEVELS.length !== 15)
     throw new Error("LEVELS debe contener 15 niveles.");
 
-  if (!Array.isArray(ALL) || ALL.length !== 27)
-    throw new Error("ALL debe contener 27 letras.");
+  if (!Array.isArray(ALL) || ALL.length !== 26 || ALL.includes("Ñ"))
+    throw new Error("ALL debe contener 26 letras (sin Ñ).");
 
   if (!Array.isArray(STAGES) || !Array.isArray(STAGE_LV) || !RES)
     throw new Error("Las estructuras de data.js no son válidas.");
@@ -99,6 +101,15 @@ function load() {
         d.levels.push(level.n);
     });
     d.v2 = 1;
+  }
+
+  /* v3: se eliminó la Ñ (27 → 26 letras). Se conserva todo lo demás: puntos, racha,
+     niveles superados, palabras, frases e insignias. */
+  if (d.v3 !== 1) {
+    d.done = [...new Set(d.done.filter(letter => ALL.includes(letter)))];
+    Object.keys(d.mastery).forEach(key => { if (key.length === 1 && !ALL.includes(key)) delete d.mastery[key]; });
+    d.history = d.history.filter(entry => !(entry && entry.w === "Ñ"));
+    d.v3 = 1;
   }
 
   return d;
@@ -180,31 +191,21 @@ function toast(message) {
   toast.timer = setTimeout(() => el.classList.remove("show"), 2400);
 }
 
-function beep(frequency = 650) {
-  if (!data.sound) return;
-  navigator.vibrate?.(frequency >= 800 ? 40 : 15);
-  try {
-    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
-    if (actx.state === "suspended") actx.resume();
-    const osc = actx.createOscillator();
-    const gain = actx.createGain();
-    osc.frequency.value = frequency;
-    gain.gain.value = 0.045;
-    osc.connect(gain);
-    gain.connect(actx.destination);
-    osc.start();
-    osc.stop(actx.currentTime + 0.12);
-  } catch (error) {
-    console.warn("Sonido no disponible:", error);
-  }
-}
-
 function fb(message, color = "") {
   const el = $("feedback");
   if (!el) return;
   if (el.textContent !== message) el.textContent = message;
   const cls = "feedback " + color;
   if (el.className !== cls) el.className = cls;
+
+  /* El mismo mensaje se muestra sobre la cámara: en el teléfono se ve sin desplazarse */
+  const hint = $("camHint");
+  if (hint) {
+    const text = camOn ? message : "";
+    if (hint.textContent !== text) hint.textContent = text;
+    const hc = "cam-hint " + color;
+    if (hint.className !== hc) hint.className = hc;
+  }
 }
 
 /* Precarga las imágenes del nivel para que el cambio de letra sea instantáneo */
@@ -380,7 +381,7 @@ function renderOverall() {
   setText("mbPct", percentage + "%");
   setText("sbPoints", data.points); setText("mbPoints", data.points);
   setText("sbStreak", data.streak); setText("mbStreak", data.streak);
-  setText("sbLetters", data.done.length + "/27"); setText("sbLevels", data.levels.length + "/15");
+  setText("sbLetters", data.done.length + "/" + ALL.length); setText("sbLevels", data.levels.length + "/15");
 }
 
 
@@ -406,6 +407,7 @@ function selectLevel(number) {
   endQuiz();
   reset();
   lv = number;
+  lvGain = 0;
 
   const level = L(number);
   idx = level.items.findIndex(item => !isDone(level, item));
@@ -466,12 +468,12 @@ function startPractice() {
       if (full && step < sequence.length - 1) {
         step++;
         left = 4;
-        beep(500);
+        sfx("step");
         fb("Siguiente letra.");
       } else {
         stopClock();
         phase = "eval";
-        beep(700);
+        sfx("warn");
         fb("Tiempo terminado. Haz tu autoevaluación.");
       }
     }
@@ -487,7 +489,7 @@ function evalYesBase() {
   if (level.type === "words" && !full) {
     step++;
     phase = "idle";
-    beep(760);
+    sfx("step");
 
     if (step >= sequence.length) {
       full = true;
@@ -549,9 +551,14 @@ function completeBase() {
   checkBadges();
   save();
   reset();
-  beep(880);
 
-  fb(`✓ «${item}» completado. +${points} puntos.` +
+  const kind = level.type === "letters" ? "letter" : "word";
+  const doneNow = level.items.filter(x => isDone(level, x)).length;
+  lvGain += points;
+  sfx(kind);
+  celebrate(kind, item, points, `${doneNow} / ${level.items.length}`);
+
+  fb(`¡Correcto! «${item}» completado. +${points} puntos.` +
     (level.type === "letters" && allDone(level) && !passed(lv)
       ? " Ya puedes tomar la evaluación final."
       : ""), "ok");
@@ -638,7 +645,7 @@ function renderQuiz() {
 
       const correct = button.dataset.o === key;
       if (correct) quiz.ok++;
-      beep(correct ? 880 : 300);
+      sfx(correct ? "letter" : "warn");
 
       $("quizBox").querySelectorAll("[data-o]").forEach(option => {
         option.disabled = true;
@@ -664,7 +671,9 @@ function finishQuiz() {
   const correct = quiz.ok >= required;
   const result = quiz.ok;
 
-  if (correct && !passed(lv)) {
+  const newly = correct && !passed(lv);
+
+  if (newly) {
     data.levels.push(lv);
     data.points += 50;
     score += 50;
@@ -681,8 +690,10 @@ function finishQuiz() {
 
   fb(correct
     ? `¡Evaluación superada (${result}/${total})! Nivel desbloqueado.`
-    : `Acertaste ${result}. Necesitas ${required} para avanzar. Repasa e inténtalo de nuevo.`,
+    : `Acertaste ${result}. Necesitas ${required} para avanzar. No te preocupes, repasa e inténtalo nuevamente.`,
     correct ? "ok" : "warn");
+
+  if (newly) levelUp(lv, lvGain + 50);
 }
 
 function endQuiz() {
@@ -908,7 +919,7 @@ function renderStats() {
   set("statLevels", data.levels.length + "/15");
   set("statPoints", data.points);
   set("statStreak", data.streak + "");
-  set("statLetters", data.done.length + "/27");
+  set("statLetters", data.done.length + "/" + ALL.length);
   set("statWords", data.words.length);
   $("mastery").innerHTML = ALL.map(l => `<div><b>${esc(l)}</b>${data.mastery[l] || 0}%</div>`).join("");
   $("levelStats").innerHTML = LEVELS.map(level => {
@@ -942,6 +953,7 @@ function guideShow(letter) {
 }
 
 function renderGuide() {
+  setText("guideCount", ALL.length + " letras");
   $("alphabetGrid").innerHTML = ALL.map(letter => `
     <button type="button" class="alphabet-cell"
       data-l="${esc(letter)}" aria-label="Ver letra ${esc(letter)}">
@@ -1019,6 +1031,7 @@ function bindEvents() {
     data.sound = !data.sound;
     save();
     syncSound();
+    sfx("tap");                      /* prueba de sonido al activarlo */
   };
 
   $("openSettings").onclick = () => {
@@ -1052,7 +1065,7 @@ function bindEvents() {
     const sound = data.sound;
     const landmarks = data.landmarks;
 
-    data = { ...DEF, v2: 1, sound, landmarks, overlay: data.overlay, hold: data.hold, tol: data.tol, autoNext: data.autoNext };
+    data = { ...DEF, v2: 1, v3: 1, sound, landmarks, overlay: data.overlay, hold: data.hold, tol: data.tol, autoNext: data.autoNext, vol: data.vol };
     save();
     score = 0;
     reset();
@@ -1088,8 +1101,10 @@ function init() {
   validateData();
 
   data = load();
+  save();                            /* guarda la migración de progreso (v3) una sola vez */
   syncSound();
   bindEvents();
+  dockRef();
   renderLevels();
   renderGuide();
 
@@ -1113,86 +1128,108 @@ function init() {
 
 /* ==DETECTOR-START== */
 /*
-  Qué cambió respecto a la versión anterior:
-  - Usa las coordenadas 3D "world" de MediaPipe (en metros): los ángulos
-    de los dedos ya no dependen de la distancia a la cámara ni de si la
-    mano está inclinada.
-  - Corrige la deformación por proporción de pantalla (4:3 / vertical).
-  - Cada dedo tiene un "curl" continuo (0 = recto, 1 = cerrado) con bandas
-    de tolerancia, en vez de cortes duros 0/1/2 que oscilaban.
-  - El pulgar se mide con la posición lateral respecto a la palma
-    (distingue A de S/T) y funciona igual con mano izquierda o derecha.
-  - Se calcula el costo de TODAS las letras: la letra pedida solo se acepta
-    si encaja y no hay otra letra claramente mejor (evita falsos positivos).
-  - Las letras con reglas idénticas (A/S/T, M/N, R/U…) se aceptan entre sí:
-    la geometría de una sola mano no puede separarlas.
+  Detector geométrico 3D (sin entrenamiento, sin posiciones absolutas).
+  - Usa las coordenadas "world" de MediaPipe: los ángulos y distancias no
+    dependen de la distancia a la cámara ni del tamaño de la mano (todo se
+    normaliza con el largo de la palma).
+  - Curl de cada dedo = mezcla de flexión de articulaciones y alcance de la
+    punta respecto a la muñeca (más estable que una sola medida).
+  - Pulgar: posición lateral + extensión + alcance (distingue A de S/T y el
+    pulgar "hacia adelante" de P/K).
+  - Orientación: ángulo en la imagen del eje muñeca→nudillos; si la mano apunta
+    a la cámara el ángulo no es fiable y su peso baja solo.
+  - Se calcula el costo de TODAS las letras: la pedida solo se acepta si encaja
+    y ninguna otra (fuera de su grupo EQUIV) encaja claramente mejor.
 */
 const GCDetector = (() => {
   const RAD = 180 / Math.PI;
   const FINGERS = [[5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20]];
+  const REACH_FULL = [1.95, 2.05, 2.0, 1.8];       /* |muñeca→punta| / |muñeca→nudillo| con el dedo recto */
   const clamp = (v, a = 0, b = 1) => v < a ? a : v > b ? b : v;
   const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: (a.z || 0) - (b.z || 0) });
   const len = v => Math.hypot(v.x, v.y, v.z);
   const dot = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
   const dist3 = (a, b) => len(sub(a, b));
+  const avg = pts => ({
+    x: pts.reduce((s, q) => s + q.x, 0) / pts.length,
+    y: pts.reduce((s, q) => s + q.y, 0) / pts.length,
+    z: pts.reduce((s, q) => s + (q.z || 0), 0) / pts.length
+  });
   const angleBetween = (u, v) =>
     Math.acos(clamp(dot(u, v) / ((len(u) * len(v)) || 1e-9), -1, 1)) * RAD;
 
   /* Bandas aceptadas de curl: 1 = extendido, 0 = doblado, 2 = a medias */
-  const BANDS = { 1: [0, 0.3], 0: [0.68, 1], 2: [0.22, 0.92] };
+  const BANDS = { 1: [0, 0.34], 0: [0.62, 1], 2: [0.2, 0.9] };
   const W_FINGER = 1, W_THUMB = 0.7, W_ORI = 0.8, W_SPREAD = 0.8;
+  const NAMES = ["índice", "medio", "anular", "meñique"];
 
   function features(p, w, aspect) {
     const P = dist3(w[0], w[9]) || 1e-6;                 /* largo de la palma (m) */
 
-    /* Curl por dedo: suma de flexiones MCP + PIP + DIP */
-    const curl = FINGERS.map(([m, a, b, t]) => {
+    /* Curl por dedo (0 = recto, 1 = cerrado) */
+    const curl = FINGERS.map(([m, a, b, t], i) => {
       const meta = sub(w[m], w[0]);
       const s1 = sub(w[a], w[m]), s2 = sub(w[b], w[a]), s3 = sub(w[t], w[b]);
-      return clamp((angleBetween(meta, s1) + angleBetween(s1, s2) + angleBetween(s2, s3)) / 220);
+      const byAngle = clamp((angleBetween(meta, s1) + angleBetween(s1, s2) + angleBetween(s2, s3)) / 220);
+      const reach = dist3(w[0], w[t]) / (dist3(w[0], w[m]) || 1e-6);
+      const byReach = clamp((REACH_FULL[i] - reach) / (REACH_FULL[i] - 1));
+      return 0.65 * byAngle + 0.35 * byReach;
     });
-    const cls = curl.map(c => c < 0.26 ? 1 : c > 0.75 ? 0 : 2);
+    const cls = curl.map(c => c < 0.26 ? 1 : c > 0.72 ? 0 : 2);
 
-    /* Pulgar: posición lateral respecto al índice sobre el eje índice→meñique */
+    const mcp = avg([w[5], w[9], w[13], w[17]]);
+    const centre = avg([w[0], mcp]);
+
+    /* Pulgar */
     const axV = sub(w[17], w[5]);
-    const ax = { x: axV.x / (len(axV) || 1e-9), y: axV.y / (len(axV) || 1e-9), z: axV.z / (len(axV) || 1e-9) };
+    const axL = len(axV) || 1e-9;
+    const ax = { x: axV.x / axL, y: axV.y / axL, z: axV.z / axL };
     const tv = sub(w[4], w[5]);
     const tx = dot(tv, ax) / P;                           /* negativo = pulgar por fuera de la palma */
     const tOut = len(tv) / P;
-    const sep = clamp(0.7 * clamp(-tx / 0.25) + 0.3 * clamp((tOut - 0.55) / 0.35));
+    const sepA = clamp(0.7 * clamp(-tx / 0.25) + 0.3 * clamp((tOut - 0.55) / 0.35));
+    const flex = angleBetween(sub(w[2], w[1]), sub(w[3], w[2])) + angleBetween(sub(w[3], w[2]), sub(w[4], w[3]));
+    const ext = clamp(1 - (flex - 25) / 70);              /* 1 = pulgar recto */
+    const reachT = dist3(w[4], centre) / P;
+    const sepB = ext * clamp((reachT - 0.45) / 0.25);      /* pulgar recto y alejado de la palma */
+    const sep = Math.max(sepA, sepB);
     const pinch = dist3(w[4], w[8]) / P;                  /* pulgar tocando la punta del índice */
 
-    /* Orientación de la mano en la imagen (corrigiendo la proporción) */
-    const dx = (p[9].x - p[0].x) * aspect, dy = p[9].y - p[0].y;
+    /* Orientación en la imagen (corrigiendo la proporción) */
+    const mi = avg([p[5], p[9], p[13], p[17]]);
+    const dx = (mi.x - p[0].x) * aspect, dy = mi.y - p[0].y;
     const ang = Math.atan2(-dy, dx) * RAD;                /* 90 = arriba, -90 = abajo */
-    const palmImg = Math.hypot(dx, dy);
+    const palmImg = Math.hypot((p[9].x - p[0].x) * aspect, p[9].y - p[0].y);
+    const va = sub(mcp, w[0]);
+    const inPlane = Math.hypot(va.x, va.y) / (len(va) || 1e-9);   /* 1 = la mano está de frente al plano de la imagen */
 
-    /* Apertura entre índice y medio */
-    const spread = angleBetween(sub(w[8], w[5]), sub(w[12], w[9]));
+    /* Separación índice–medio: ángulo y distancia entre puntas */
+    const angSp = angleBetween(sub(w[8], w[5]), sub(w[12], w[9]));
+    const gap = dist3(w[8], w[12]) / P;
+    const spread = Math.max(angSp, (gap - 0.3) * 60);
 
-    return { P, curl, cls, tx, tOut, sep, pinch, ang, palmImg, spread,
+    return { P, curl, cls, tx, tOut, sep, pinch, ang, palmImg, inPlane, spread,
              thumb: pinch < 0.35 && curl[0] > 0.08 ? 2 : sep >= 0.4 ? 1 : 0,
              ori: ang > 45 && ang < 135 ? "up" : ang < -45 && ang > -135 ? "down" : "side" };
   }
 
   const fingerCost = (c, code) => {
     const [lo, hi] = BANDS[code] || BANDS[2];
-    return clamp((c < lo ? lo - c : c > hi ? c - hi : 0) / 0.3);
+    return clamp((c < lo ? lo - c : c > hi ? c - hi : 0) / 0.35);
   };
 
-  const thumbCost = (f, code) => code === 1 ? clamp((0.3 - f.sep) / 0.3)
+  const thumbCost = (f, code) => code === 1 ? clamp((0.35 - f.sep) / 0.3)
     : code === 0 ? clamp((f.sep - 0.5) / 0.4)
     : clamp((f.pinch - 0.3) / 0.35);
 
   const angDiff = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
-  const oriCost = (ang, o) => {
-    const err = o === "up" ? angDiff(ang, 90)
-      : o === "down" ? angDiff(ang, -90)
-      : Math.min(angDiff(ang, 0), angDiff(ang, 180));
-    return clamp((err - 35) / 30);
-  };
+  const oriErr = (ang, o) => o === "up" ? angDiff(ang, 90)
+    : o === "down" ? angDiff(ang, -90)
+    : Math.min(angDiff(ang, 0), angDiff(ang, 180));
+  /* Zona libre de 40° y costo completo a 80°; si la mano apunta a la cámara pesa menos */
+  const oriCost = (f, o) => clamp((oriErr(f.ang, o) - 40) / 40) * clamp((f.inPlane - 0.35) / 0.35);
 
-  const spreadCost = (deg, sp) => sp === "apart" ? clamp((18 - deg) / 12) : clamp((deg - 12) / 12);
+  const spreadCost = (deg, sp) => sp === "apart" ? clamp((18 - deg) / 12) : clamp((deg - 14) / 12);
 
   function cost(rule, f) {
     let c = 0;
@@ -1203,10 +1240,15 @@ const GCDetector = (() => {
     const th = [].concat(rule.th ?? -1);
     if (!th.includes(-1)) c += W_THUMB * Math.min(...th.map(code => thumbCost(f, code)));
     const o = [].concat(rule.o || "any");
-    if (!o.includes("any")) c += W_ORI * Math.min(...o.map(x => oriCost(f.ang, x)));
+    if (!o.includes("any")) c += W_ORI * Math.min(...o.map(x => oriCost(f, x)));
     if (rule.sp) c += W_SPREAD * spreadCost(f.spread, rule.sp);
     return c;
   }
+
+  const groupOf = letter => {
+    const groups = typeof EQUIV !== "undefined" ? EQUIV : [];
+    return groups.find(g => g.includes(letter)) || [letter];
+  };
 
   /* tol: 0 = estricta, 0.5 = normal, 1 = flexible (mismo ajuste de la pantalla de ajustes) */
   function classify(f, shapes, tol, target) {
@@ -1226,10 +1268,13 @@ const GCDetector = (() => {
     let ok = false, mine = null;
     if (target && costs[target] !== undefined) {
       mine = costs[target];
+      const rule = shapes[target];
+      const same = groupOf(target);
       let other = Infinity;
-      for (const k in costs) if (k !== target && costs[k] < other) other = costs[k];
-      const moving = !!shapes[target].mv;     /* en las letras con movimiento la forma varía más */
-      ok = mine <= thr * (moving ? 1.2 : 1) && (moving || mine <= other + margin);
+      for (const k in costs) if (!same.includes(k) && costs[k] < other) other = costs[k];
+      const moving = !!rule.mv;               /* en las letras con movimiento la forma varía más */
+      const k = rule.k || 1;
+      ok = mine <= thr * k * (moving ? 1.2 : 1) && (moving || mine <= other + margin * k);
     }
     return { ok, list, bestCost, cost: mine, thr };
   }
@@ -1255,19 +1300,56 @@ const GCDetector = (() => {
     };
   }
 
+  /* Consejo concreto para el usuario: lo que más se aleja de la regla de la letra */
+  function advise(rule, f) {
+    let worst = 0.3, msg = "";
+    const take = (c, m) => { if (c > worst) { worst = c; msg = m; } };
+
+    rule.f.forEach((v, i) => {
+      if (v === -1) return;
+      let best = Infinity, code = [].concat(v)[0];
+      [].concat(v).forEach(cd => { const c = fingerCost(f.curl[i], cd); if (c < best) { best = c; code = cd; } });
+      take(best, code === 1 ? `Estira más el dedo ${NAMES[i]}.`
+        : code === 0 ? `Dobla más el dedo ${NAMES[i]}.`
+        : f.curl[i] < 0.2 ? `Dobla un poco el dedo ${NAMES[i]}.` : `Estira un poco el dedo ${NAMES[i]}.`);
+    });
+
+    const th = [].concat(rule.th ?? -1);
+    if (!th.includes(-1)) {
+      let best = Infinity, code = th[0];
+      th.forEach(cd => { const c = thumbCost(f, cd); if (c < best) { best = c; code = cd; } });
+      take(W_THUMB * best, code === 1 ? "Separa un poco el pulgar de la mano."
+        : code === 0 ? "Pega el pulgar a la mano."
+        : "Une la punta del pulgar con la del índice.");
+    }
+    if (rule.sp) take(W_SPREAD * spreadCost(f.spread, rule.sp),
+      rule.sp === "apart" ? "Intenta separar un poco los dedos índice y medio." : "Junta los dedos índice y medio.");
+
+    const o = [].concat(rule.o || "any");
+    if (!o.includes("any")) {
+      const c = W_ORI * Math.min(...o.map(x => oriCost(f, x)));
+      const first = o[0];
+      take(c, first === "up" ? "Levanta la mano: los dedos deben apuntar hacia arriba."
+        : first === "down" ? "Voltea la mano: los dedos deben apuntar hacia abajo."
+        : "Gira la mano hacia un lado, como en la referencia.");
+    }
+    return msg || "Compara tu mano con la referencia y mantenla quieta.";
+  }
+
   function describe(f) {
     const n = ["Índ", "Med", "Anu", "Meñ"], sym = ["↓", "↑", "~"];
     return f.cls.map((v, i) => n[i] + sym[v] + Math.round(f.curl[i] * 100)).join(" ") +
       ` · pulgar ${["pegado", "fuera", "pinza"][f.thumb]} (${Math.round(f.sep * 100)}) · ${f.ori} · sep ${Math.round(f.spread)}°`;
   }
 
-  return { features, classify, createSmoother, describe };
+  return { features, classify, createSmoother, describe, advise };
 })();
 /* ==DETECTOR-END== */
 
 let needBreak = false, auto = false, stuck = false, held = 0, cool = 0, since = 0;
 let trail = [], queue = [], qi = 0, nextT = null;
-let lastTick = 0, movedUntil = 0, coachMsg = "";
+let lastTick = 0, movedUntil = 0, coachMsg = "", coachAt = 0, lostAt = 0;
+const votes = [];
 const smoother = GCDetector.createSmoother();
 const playable = l => l.items.some(i => (l.type === "words" ? spell(i) : [i]).some(hasRef));
 let hbarV = -1;
@@ -1281,7 +1363,7 @@ const hbar = p => {
 
 function reset() {
   resetBase();
-  auto = false; stuck = false; held = 0; trail = []; movedUntil = 0; coachMsg = "";
+  auto = false; stuck = false; held = 0; trail = []; movedUntil = 0; coachMsg = ""; coachAt = 0; lostAt = 0; votes.length = 0;
   clearTimeout(nextT); hbar(0);
 }
 
@@ -1295,23 +1377,38 @@ function render() {
   $("autoBtn").classList.toggle("stop", auto);
   $("restartBtn").disabled = phase === "run";
   $("autoBtn").disabled = l.type === "phrases" || !playable(l);
+  $("camStart").disabled = $("autoBtn").disabled;
   if (phase === "auto") setText("timer", "");
   updateCamState();
 }
 
-/* Mensajes de ayuda, solo cuando cambian y tras unos segundos sin éxito */
-function setCoach(msg, now) {
-  if (msg === coachMsg) return;
-  if (!msg || now - since > 2500) {
-    coachMsg = msg;
-    fb(msg || `Haz la seña que se muestra y mantenla: ${cur()}`, msg ? "warn" : "");
+/* Texto de instrucción actual (qué debe hacer la persona) */
+function promptFor() {
+  const level = L(lv), item = cur();
+  if (!level || !item) return "";
+  if (level.type === "words") {
+    const sp = steps(), n = Math.min(step, sp.length - 1);
+    return `Deletrea ${item}: haz la letra ${sp[n]} (${n + 1} de ${sp.length}).`;
   }
+  return `Haz la letra ${item} y mantén la posición.`;
+}
+
+/* Mensajes de ayuda: solo cuando cambian, con una pausa mínima entre mensajes
+   y tras unos segundos sin éxito (no se corrige antes de tiempo). */
+const HOLD_MSG = "Mantén la posición…";
+function setCoach(msg, now, urgent) {
+  if (msg === coachMsg) return;
+  if (!urgent && msg && now - since < 2500) return;
+  if (!urgent && msg && coachMsg && now - coachAt < 1500) return;
+  coachMsg = msg;
+  coachAt = now;
+  fb(msg || promptFor(), !msg ? "" : msg === HOLD_MSG ? "ok" : "warn");
 }
 
 function coachFor(f, p) {
-  if (f.palmImg < 0.1) return "Acerca un poco la mano a la cámara.";
+  if (f.palmImg < 0.1) return "Acerca un poco más tu mano a la cámara.";
   if (p.some(q => q.x < 0.01 || q.x > 0.99 || q.y < 0.01 || q.y > 0.99))
-    return "Aleja un poco la mano: se sale del cuadro.";
+    return "Aleja un poco tu mano: se sale del cuadro.";
   return "";
 }
 
@@ -1333,7 +1430,7 @@ function autoTick(sm, now, aspect) {
   const letter = steps()[step], rule = SHAPES[letter];
 
   if (!rule) {
-    if (!stuck) { stuck = true; fb(`«${letter}» no tiene reglas automáticas (falta referencia). Hazla y pulsa «Lo conseguí».`, "warn"); render(); }
+    if (!stuck) { stuck = true; fb(`«${letter}» no tiene reglas automáticas. Hazla como en la referencia y pulsa «Lo conseguí».`, "warn"); render(); }
     return;
   }
 
@@ -1344,68 +1441,97 @@ function autoTick(sm, now, aspect) {
   if (!sm) {
     held = Math.max(0, held - dt * 2);
     trail = [];
+    votes.length = 0;
     hbar(held / need);
     setText("handState", "Sin mano a la vista");
-    setCoach("No veo tu mano. Colócala dentro del cuadro y con buena luz.", now);
+    if (!lostAt) lostAt = now;
+    /* el aviso solo aparece si la mano falta más de 0,7 s (evita parpadeos) */
+    if (now - lostAt > 700) setCoach("Coloca tu mano frente a la cámara, dentro del cuadro y con buena luz.", now, true);
     return;
   }
+  lostAt = 0;
 
   const f = GCDetector.features(sm.p, sm.w, aspect);
   const res = GCDetector.classify(f, SHAPES, data.tol ?? TOL, letter);
 
-  if (needBreak) { if (res.ok) return; needBreak = false; }
+  if (needBreak) { votes.length = 0; if (res.ok) return; needBreak = false; }
 
   if (rule.mv) updateMotion({ x: sm.p[rule.mv].x * aspect, y: sm.p[rule.mv].y }, now, f.palmImg);
   const moved = !rule.mv || now < movedUntil;
 
   /* Texto de estado: qué letra cree ver la app */
   const seen = res.bestCost <= res.thr + 0.3 ? "Detecto: " + res.list.join(" / ") : "Forma no reconocida";
-  setText("handState", DEBUG ? `${seen} · ${describe(f)}` : seen);
+  setText("handState", DEBUG ? `${seen} · ${GCDetector.describe(f)}` : seen);
 
-  /* Acumula tiempo con la seña correcta; si se pierde, decae al doble de rápido (tolera temblor) */
-  const match = res.ok && moved;
+  /* Confirmación: la forma debe cumplirse en 5 de los últimos 8 fotogramas (tolera
+     un parpadeo, pero no una coincidencia momentánea) y además mantenerse el tiempo
+     de sostén. Si se pierde, el avance decae al doble de rápido (tolera temblor). */
+  votes.push(res.ok && moved);
+  if (votes.length > 8) votes.shift();
+  const match = votes.reduce((n, v) => n + v, 0) >= 5;
   held = match ? held + dt : Math.max(0, held - dt * 2);
   const pr = Math.min(1, held / need);
   hbar(pr);
 
   if (pr >= 1) { autoOk(); return; }
 
-  setCoach(coachFor(f, sm.p), now);
+  if (match && pr > 0.12) { setCoach(HOLD_MSG, now, true); return; }
+  if (res.ok && rule.mv && !moved) { setCoach("Muy bien: ahora haz el movimiento de la letra.", now); return; }
+
+  let msg = coachFor(f, sm.p);
+  if (!msg && res.bestCost > res.thr * 0.6) msg = GCDetector.advise(rule, f);
+  setCoach(msg, now);
 
   if (now - since > 20000 && !stuck) {
     stuck = true;
-    fb("¿No te detecta? Mejora la luz y el ángulo. Si tu seña coincide con la referencia, pulsa «Lo conseguí» (autoevaluación).", "warn");
+    fb("No te preocupes, inténtalo nuevamente con buena luz. Si tu seña ya coincide con la referencia, pulsa «Lo conseguí».", "warn");
     render();
   }
 }
 
-const describe = f => GCDetector.describe(f);
-
 function autoOk() {
-  held = 0; trail = []; movedUntil = 0; coachMsg = ""; lastTick = 0; hbar(0);
+  held = 0; trail = []; movedUntil = 0; coachMsg = ""; lastTick = 0; votes.length = 0; hbar(0);
   cool = performance.now() + 1200; since = cool; stuck = false;
   const sp = steps();
-  if (L(lv).type === "words" && step < sp.length - 1) { needBreak = sp[step + 1] === sp[step]; step++; beep(760); fb("¡Bien! Siguiente letra.", "ok"); render(); return; }
-  step = 0; complete();
+  if (L(lv).type === "words" && step < sp.length - 1) {
+    needBreak = sp[step + 1] === sp[step];
+    celebrate("step", sp[step]);
+    sfx("step");
+    step++;
+    fb(`¡Bien! Ahora la letra ${sp[step]}.`, "ok");
+    render();
+    return;
+  }
+  step = 0;
+  complete();
 }
 
 function complete() {
-  const was = auto;
+  const was = auto, wasPassed = passed(lv), n = lv;
   completeBase();
   if (was) { auto = true; phase = "auto"; advanceAuto(); }
+  else if (!wasPassed && passed(n)) levelUp(n, lvGain);
+  enterAnim();
 }
 
 function advanceAuto() {
   const l = L(lv); qi++;
   if (qi < queue.length) {
     idx = l.items.indexOf(queue[qi]); step = 0; stuck = false; since = performance.now() + 1200;
-    fb(`✓ ¡Bien! Ahora haz: ${queue[qi]}`, "ok"); render(); return;
+    fb(`¡Correcto! Pasemos a la siguiente ${l.type === "words" ? "palabra" : "letra"}: ${queue[qi]}.`, "ok");
+    render();
+    return;
   }
   auto = false; phase = "idle"; hbar(0);
-  if (!passed(lv)) { data.levels.push(lv); data.points += 50; score += 50; data.history.unshift({ t: Date.now(), w: `Nivel ${lv} superado`, p: 50 }); checkBadges(); save(); }
-  beep(1050); fb(`¡Nivel ${lv} superado!` + (data.autoNext !== false && lv < 15 ? " Pasando al siguiente nivel…" : ""), "ok");
+  let bonus = 0;
+  if (!passed(lv)) {
+    data.levels.push(lv); data.points += 50; score += 50; bonus = 50;
+    data.history.unshift({ t: Date.now(), w: `Nivel ${lv} superado`, p: 50 });
+    checkBadges(); save();
+  }
+  fb(`¡Nivel ${lv} superado!`, "ok");
   renderLevels(); render(); renderStats();
-  if (data.autoNext !== false && lv < 15 && unlocked(lv + 1)) nextT = setTimeout(() => selectLevel(lv + 1), 2500);
+  levelUp(lv, lvGain + bonus);
 }
 
 function evalYes() {
@@ -1428,7 +1554,7 @@ async function startLevel() {
   if (l.type === "phrases") { fb("Las frases aún no tienen detección automática ni referencias validadas.", "warn"); return; }
   if (!camOn) { await camStart(); if (!camOn) return; }
   data.landmarks = true; $("optLandmarks").checked = true; save();
-  if (!lm) fb("Cargando el detector de manos… (la primera vez puede tardar)");
+  if (!lm) fb("Preparando el detector de manos… la primera vez puede tardar unos segundos.");
   await startLM();
   if (!lm) { fb("No se pudo cargar el detector (¿sin internet?). Usa «Práctica manual».", "warn"); return; }
   reset();
@@ -1436,7 +1562,7 @@ async function startLevel() {
   qi = 0; idx = l.items.indexOf(queue[0]);
   auto = true; phase = "auto"; since = performance.now() + 800; cool = since; lastTick = 0;
   if (narrow()) $("camBox").scrollIntoView({ behavior: "smooth", block: "center" });
-  fb(`Haz la seña que se muestra y mantenla: ${queue[0]}`); render();
+  fb(promptFor()); render();
 }
 
 function camStop() {
@@ -1467,6 +1593,7 @@ function syncSettings() {
   $("optAutoNext").checked = data.autoNext !== false;
   $("optHold").value = String(data.hold || HOLD_MS);
   $("optTol").value = String(data.tol ?? TOL);
+  $("optVol").value = String(data.vol ?? 0.9);
   $("soundToggle").checked = !!data.sound;
 }
 $("restartBtn").onclick = restartLevel;
@@ -1475,9 +1602,222 @@ $("optOverlay").onchange = e => { data.overlay = e.target.checked; save(); if (!
 $("optAutoNext").onchange = e => { data.autoNext = e.target.checked; save(); };
 $("optHold").onchange = e => { data.hold = Number(e.target.value); save(); toast("Tiempo de sostén actualizado"); };
 $("optTol").onchange = e => { data.tol = Number(e.target.value); save(); toast("Exigencia actualizada"); };
+$("optVol").onchange = e => { data.vol = Number(e.target.value); save(); sfx("letter"); };
 $("resetSettings").onclick = () => {
-  data.overlay = true; data.autoNext = true; data.hold = HOLD_MS; data.tol = TOL; data.sound = true; save(); syncSettings(); toast("Ajustes restablecidos");
+  data.overlay = true; data.autoNext = true; data.hold = HOLD_MS; data.tol = TOL; data.sound = true; data.vol = 0.9; save(); syncSettings(); toast("Ajustes restablecidos");
 };
+
+/* ===== SONIDO =====
+   Un solo AudioContext con compresor (más volumen sin distorsión). Se crea/activa
+   en el primer toque del usuario, requisito de los navegadores móviles. */
+let master = null, audioReady = false;
+const SFX = {
+  tap:    { n: [[880, 0]], d: 0.06, p: 0.14, v: 8 },
+  step:   { n: [[784, 0]], d: 0.14, p: 0.26, v: 15 },
+  letter: { n: [[784, 0], [1175, 0.09]], d: 0.2, p: 0.34, v: [20, 30, 25] },
+  word:   { n: [[523, 0], [659, 0.08], [784, 0.16], [1047, 0.25]], d: 0.24, p: 0.34, v: [25, 40, 25, 40] },
+  level:  { n: [[523, 0], [659, 0.1], [784, 0.2], [1047, 0.3], [1319, 0.42], [1568, 0.54]], d: 0.4, p: 0.34, v: [40, 60, 40, 60, 120] },
+  warn:   { n: [[392, 0], [294, 0.12]], d: 0.2, p: 0.24, v: 40 }
+};
+
+function audio() {
+  try {
+    if (!actx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      actx = new AC();
+      master = actx.createGain();
+      const comp = actx.createDynamicsCompressor();
+      comp.threshold.value = -14; comp.knee.value = 18; comp.ratio.value = 6;
+      comp.attack.value = 0.003; comp.release.value = 0.2;
+      master.connect(comp);
+      comp.connect(actx.destination);
+    }
+    if (actx.state === "suspended") actx.resume().catch(() => {});
+    if (!audioReady) {                                    /* sonido mudo: "desbloquea" iOS */
+      const src = actx.createBufferSource();
+      src.buffer = actx.createBuffer(1, 1, 22050);
+      src.connect(actx.destination);
+      src.start(0);
+      audioReady = true;
+    }
+    master.gain.value = Math.max(0.2, Math.min(2, Number(data?.vol) || 0.9));
+    return actx;
+  } catch (error) {
+    console.warn("Sonido no disponible:", error);
+    return null;
+  }
+}
+
+function sfx(kind) {
+  if (!data?.sound) return;
+  const s = SFX[kind];
+  if (!s) return;
+  navigator.vibrate?.(s.v);
+  const ctx = audio();
+  if (!ctx) return;
+  const t0 = ctx.currentTime + 0.01;
+  s.n.forEach(([freq, off], i) => {
+    const t = t0 + off;
+    const dur = i === s.n.length - 1 ? s.d * 1.6 : s.d;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(s.p, t + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    g.connect(master);
+    [[freq, "sine", 1], [freq * 2, "triangle", 0.22]].forEach(([f, type, amp]) => {
+      const osc = ctx.createOscillator(), og = ctx.createGain();
+      osc.type = type; osc.frequency.value = f; og.gain.value = amp;
+      osc.connect(og); og.connect(g);
+      osc.start(t); osc.stop(t + dur + 0.02);
+    });
+  });
+}
+
+const unlockAudio = () => { if (data?.sound) audio(); };
+["pointerdown", "touchend", "click", "keydown"].forEach(ev => addEventListener(ev, unlockAudio, { passive: true }));
+
+/* Sonido breve en los botones principales (no se repite mientras la cámara busca) */
+document.addEventListener("click", event => {
+  if (event.target.closest("#lfGo, #lfStay")) return;
+  if (event.target.closest(".primary-btn, .success-btn, .level-btn")) sfx("tap");
+});
+
+
+/* ===== ANIMACIONES =====
+   Solo transform/opacity, breves, y sin interceptar toques (pointer-events:none):
+   no interfieren con la detección. Con «movimiento reducido» se omiten las partículas. */
+const reduced = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const HUES = [199, 217, 262, 292, 330, 48];
+
+function fxAdd(html, cls, ms) {
+  const layer = $("camFx");
+  if (!layer) return;
+  const el = document.createElement("div");
+  el.className = cls;
+  el.innerHTML = html;
+  layer.appendChild(el);
+  setTimeout(() => el.remove(), ms);
+}
+
+function burst(count, radius) {
+  const layer = $("camFx");
+  if (!layer || reduced()) return;
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < count; i++) {
+    const el = document.createElement("i");
+    el.className = "fx-p";
+    el.style.setProperty("--a", (i * 360 / count + Math.random() * 14) + "deg");
+    el.style.setProperty("--d", (radius * (0.6 + Math.random() * 0.6)) + "px");
+    el.style.setProperty("--h", HUES[i % HUES.length]);
+    frag.appendChild(el);
+  }
+  layer.appendChild(frag);
+  setTimeout(() => layer.querySelectorAll(".fx-p").forEach(e => e.remove()), 900);
+}
+
+function pulse(el, keyframes, ms) {
+  if (el && !reduced() && el.animate) el.animate(keyframes, { duration: ms, easing: "ease-out" });
+}
+
+/* kind: "step" (letra dentro de una palabra) | "letter" | "word" (palabra o frase) */
+function celebrate(kind, text, pts = 0, progress = "") {
+  fxAdd("", "fx-ring", 700);
+  if (kind === "step") {
+    fxAdd(`<span>${esc(text)} ✓</span>`, "fx-pop mini show", 900);
+    burst(6, 50);
+    return;
+  }
+  if (kind === "letter") {
+    fxAdd(`<span>${esc(text)} ✓</span><small>${esc(progress)} · +${pts}</small>`, "fx-pop show", 1000);
+    burst(12, 90);
+  } else {
+    const label = L(lv)?.type === "phrases" ? "Frase completa" : "Palabra completa";
+    fxAdd(`<span>¡${label}!</span><small>${esc(text)} · +${pts} puntos</small>`, "fx-pop wide show", 1300);
+    burst(20, 120);
+  }
+  pulse(document.querySelector(".target-card"),
+    [{ boxShadow: "0 0 0 0 rgba(125,211,252,0)" }, { boxShadow: "0 0 0 8px rgba(125,211,252,.45)" }, { boxShadow: "0 0 0 0 rgba(125,211,252,0)" }], 650);
+  pulse($("levelBar"), [{ filter: "brightness(1)" }, { filter: "brightness(1.9)" }, { filter: "brightness(1)" }], 600);
+}
+
+/* Aparición de lo nuevo (siguiente letra/palabra y su referencia) */
+function enterAnim() {
+  const from = [{ opacity: 0, transform: "translateY(10px) scale(.92)" }, { opacity: 1, transform: "none" }];
+  [$("target"), $("camLetter"), $("refBox")].forEach(el => {
+    if (el && !reduced() && el.animate) el.animate(from, { duration: 340, easing: "cubic-bezier(.2,.9,.3,1.2)" });
+  });
+}
+
+
+/* ===== NIVEL COMPLETADO ===== */
+let lfTimer = null;
+
+function levelUp(n, gained) {
+  const level = L(n), next = L(n + 1);
+  if (!level || !$("levelFx")) return;
+
+  setText("lfName", `Nivel ${n} · ${level.name}`);
+  setText("lfPts", "+" + Math.max(0, gained));
+  setText("lfNext", next
+    ? `Nivel ${n + 1} desbloqueado: ${next.name}`
+    : "¡Completaste los 15 niveles! Eres Gesture Master.");
+  $("lfGo").hidden = !next;
+  setText("lfStay", next ? "Quedarme aquí" : "Cerrar");
+
+  const conf = $("lfConf");
+  conf.innerHTML = reduced() ? "" : Array.from({ length: 26 }, (_, i) =>
+    `<i style="--x:${(i * 37) % 100}%;--dl:${(i % 9) * 0.12}s;--h:${HUES[i % HUES.length]};--r:${(i * 53) % 360}deg"></i>`).join("");
+
+  clearTimeout(lfTimer);
+  const timer = $("lfTimer");
+  timer.innerHTML = "";
+  if (next && data.autoNext !== false) {
+    timer.innerHTML = '<i></i>';
+    lfTimer = setTimeout(() => closeLevelFx(true), 6000);
+  }
+
+  sfx("level");
+  $("levelFx").hidden = false;
+  (next ? $("lfGo") : $("lfStay")).focus({ preventScroll: true });
+}
+
+function closeLevelFx(goNext) {
+  clearTimeout(lfTimer);
+  if ($("levelFx").hidden) return;
+  $("levelFx").hidden = true;
+  if (goNext && L(lv + 1) && unlocked(lv + 1)) selectLevel(lv + 1);
+}
+
+$("lfGo").onclick = () => closeLevelFx(true);
+$("lfStay").onclick = () => closeLevelFx(false);
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && !$("levelFx").hidden) closeLevelFx(false);
+});
+
+
+/* ===== REFERENCIA DENTRO DE LA CÁMARA (móvil) =====
+   El mismo nodo #refBox se mueve entre el panel (escritorio) y la tarjeta flotante
+   de la cámara (móvil): no hay elementos duplicados ni una segunda cámara. */
+const dockMQ = window.matchMedia("(max-width:900px)");
+function dockRef() {
+  const box = $("refBox"), panel = $("refPanel"), card = $("refFloat");
+  if (!box || !panel || !card) return;
+  const dock = dockMQ.matches;
+  if (dock && box.parentElement !== card) card.appendChild(box);
+  else if (!dock && box.parentElement !== panel) panel.appendChild(box);
+  panel.classList.toggle("docked", dock);
+  if (!dock) card.classList.remove("big");
+}
+dockMQ.addEventListener ? dockMQ.addEventListener("change", dockRef) : dockMQ.addListener(dockRef);
+
+const toggleRef = () => $("refFloat").classList.toggle("big");
+$("refFloat").addEventListener("click", toggleRef);
+$("refFloat").addEventListener("keydown", event => {
+  if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleRef(); }
+});
+
+$("camStart").onclick = startLevel;
 
 /* ===== ESTADO VISUAL DE LA CÁMARA =====
    Se actualiza cuando algo cambia (render, bucle de detección, cámara),
