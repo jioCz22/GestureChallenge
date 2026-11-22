@@ -103,7 +103,7 @@ body[data-cam=on] #camToggle{background:rgba(244,114,182,.12);border:1px solid r
 .stage-col:nth-child(2){--c:#8b5cf6}.stage-col:nth-child(3){--c:#38bdf8}
 .stage-col h4{font-size:10px;letter-spacing:1.6px;color:var(--c);font-weight:800;margin-bottom:10px}
 .stage-col>div{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
-.level-btn{min-height:42px;border-radius:10px;background:var(--s1);border:1px solid var(--line);color:var(--muted);font-size:12px;font-weight:700;transition:background-color .18s,border-color .18s,color .18s}
+.level-btn{min-height:44px;border-radius:10px;background:var(--s1);border:1px solid var(--line);color:var(--muted);font-size:12px;font-weight:700;transition:background-color .18s,border-color .18s,color .18s}
 @media(hover:hover){.level-btn:hover:not(:disabled){border-color:var(--c);color:#fff}}
 .stage-col .level-btn.ok{color:#fff;border-color:var(--c);background:color-mix(in srgb,var(--c) 22%,transparent)}
 .stage-col .level-btn.active{background:var(--grad);color:#fff;border-color:transparent}
@@ -245,19 +245,28 @@ select{min-height:38px;background:var(--s2);color:#fff;border:1px solid var(--li
   .tabbar{display:grid}
   .app{padding:16px max(14px,env(safe-area-inset-right)) 0 max(14px,env(safe-area-inset-left))}
   .layout{grid-template-columns:1fr;gap:0}
-  .lesson-grid{grid-template-columns:1fr;gap:18px}
-  .lesson-ref{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:stretch}
-  .ref-panel{margin:0;padding:12px;display:flex;flex-direction:column}
-  .ref-panel .panel-heading{margin-bottom:8px}
-  .ref-panel .panel-heading h3{font-size:13px}
-  #refBox{flex:1}
-  .ref-desc{grid-column:1/-1;margin-top:0}
-  .target-card{min-height:170px;padding:14px}
+  .lesson-grid{grid-template-columns:1fr;gap:12px}
+  .lesson-cam{order:-1}                       /* la cámara es lo principal */
+  .lesson-ref{display:block}
+  .ref-panel.docked{display:none}             /* #refBox vive ahora dentro de la cámara */
+  .ref-desc{margin-top:10px}
+  /* El objetivo pasa a una franja compacta: letra grande + etiqueta */
+  .target-card{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;justify-items:start;gap:0 16px;min-height:0;padding:10px 16px;text-align:left}
+  .target-letter,.target-letter.long{grid-row:1/3}
+  .target-letter{font-size:clamp(44px,13vw,64px);letter-spacing:-1px}
+  .target-letter.long{font-size:clamp(22px,7vw,34px);letter-spacing:2px}
+  .target-caption{margin:0}
+  #camTarget{margin:0;font-size:0}            /* oculta el texto repetido y deja solo la etiqueta */
+  #camTarget small{display:block;font-size:10px;margin:0}
+  .lesson-cam>.panel-heading{margin-bottom:8px}
+  .lesson-cam>.panel-heading h3{font-size:13px}
   .scroll-margin,.lesson-scroll{scroll-margin-top:76px}
   .stats-grid{grid-template-columns:repeat(2,1fr)}
   .guide-detail{grid-template-columns:minmax(0,1fr)}
   #toast{bottom:calc(var(--tab-h) + var(--safe-b) + 18px)}
   .panel{box-shadow:none}
+  .cam-badge{top:auto;bottom:8px;left:8px;font-size:11px;padding:4px 10px}
+  .cam-letter{top:8px;right:8px}
 }
 
 /* =========================================================
@@ -268,7 +277,7 @@ select{min-height:38px;background:var(--s2);color:#fff;border:1px solid var(--li
   .panel{padding:14px;border-radius:16px}
   .welcome{margin-bottom:14px}
   .welcome p{font-size:13px}
-  .target-letter{font-size:clamp(58px,22vw,88px)}
+  .target-letter{font-size:clamp(44px,15vw,60px)}
   .target-letter.long{font-size:clamp(20px,7vw,30px);letter-spacing:2px}
   .lesson-header h2{font-size:20px}
 
@@ -317,7 +326,7 @@ select{min-height:38px;background:var(--s2);color:#fff;border:1px solid var(--li
   .tab{flex-direction:row;gap:7px;min-height:40px}
   .tab .pill{width:auto;height:auto;padding:5px 8px;border-radius:12px}
   .tab .pill+span{font-size:12px}
-  .lesson-grid{grid-template-columns:1fr 1fr}
+  .lesson-grid{grid-template-columns:1.3fr 1fr}
   .camera-box{width:min(100%,calc(66vh*var(--ar,1.3333)));width:min(100%,calc(66dvh*var(--ar,1.3333)))}
 }
 
@@ -326,4 +335,81 @@ select{min-height:38px;background:var(--s2);color:#fff;border:1px solid var(--li
   .brand h1{font-size:15px}
 }
 
-@media(prefers-reduced-motion:reduce){*,::before,::after{animation:none!important;transition:none!important}}
+/* =========================================================
+   GUÍA, MENSAJES Y REFERENCIA DENTRO DE LA CÁMARA
+========================================================= */
+.camera-box{contain:layout paint}
+.hand-guide{position:absolute;inset:12% 24%;z-index:2;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;border:3px dashed rgba(196,181,253,.75);border-radius:28px;color:#efe8ff;font-weight:700;font-size:13px;text-align:center;opacity:0;transition:opacity .25s;pointer-events:none}
+.hand-guide svg{width:44px;height:44px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+[data-state=idle] .hand-guide{opacity:1}
+.cam-hint{position:absolute;left:50%;bottom:12px;z-index:3;transform:translateX(-50%);width:max-content;max-width:calc(100% - 20px);padding:8px 15px;border-radius:14px;background:rgba(5,6,15,.85);border:1px solid var(--line);color:#fff;font-size:14px;font-weight:600;line-height:1.3;text-align:center;pointer-events:none}
+.cam-hint:empty{display:none}
+.cam-hint.ok{border-color:#7dd3fc;background:rgba(14,48,92,.9)}
+.cam-hint.warn{border-color:var(--vio2)}
+#cameraEmpty .primary-btn{margin-top:14px;min-height:48px;padding:12px 22px;font-size:15px;border-radius:14px}
+#cameraEmpty p{max-width:34ch;margin:0 auto}
+
+/* Tarjeta de referencia flotante (solo cuando #refBox está dentro de la cámara) */
+.ref-float{position:absolute;top:8px;left:8px;z-index:4;width:clamp(76px,26%,128px);padding:4px;border-radius:12px;background:rgba(5,6,15,.6);border:2px solid rgba(255,255,255,.6);box-shadow:0 4px 14px rgba(0,0,0,.4);cursor:pointer;transition:width .2s}
+.ref-float:empty{display:none}
+.ref-float.big{width:clamp(130px,48%,230px)}
+.ref-float #refBox{display:block}
+.ref-float #refBox img,.ref-float #refBox video{display:block;width:100%;max-width:none;height:auto;max-height:clamp(70px,24vh,150px);object-fit:contain;border:0;border-radius:8px;background:#fff}
+.ref-float.big #refBox img,.ref-float.big #refBox video{max-height:clamp(130px,42vh,260px)}
+.ref-float .empty{padding:6px;font-size:10px;color:#cfd3f0}
+
+@media(max-width:900px){
+  .cam-hint{bottom:38px;font-size:12.5px;padding:6px 12px}
+  .hand-guide{inset:22% 14% 24% 30%;font-size:12px}
+  .hand-guide svg{width:34px;height:34px}
+}
+
+/* =========================================================
+   ANIMACIONES DE LOGRO (solo transform/opacity; no tapan la mano)
+========================================================= */
+.cam-fx{position:absolute;inset:0;z-index:6;pointer-events:none;overflow:hidden}
+.fx-ring{position:absolute;inset:0;border:6px solid rgba(125,211,252,.95);border-radius:16px;animation:ringfx .65s ease-out forwards}
+@keyframes ringfx{from{opacity:.95;transform:scale(1)}to{opacity:0;transform:scale(1.06)}}
+.fx-pop{position:absolute;left:50%;top:44%;display:grid;justify-items:center;gap:2px;padding:10px 22px;border-radius:22px;background:linear-gradient(135deg,rgba(47,107,255,.94),rgba(139,92,246,.94));color:#fff;font-weight:800;font-size:clamp(34px,11vw,56px);line-height:1.05;text-align:center;opacity:0;transform:translate(-50%,-50%)}
+.fx-pop small{font-size:clamp(12px,3.4vw,16px);font-weight:700}
+.fx-pop.wide{font-size:clamp(22px,6.5vw,34px)}
+.fx-pop.mini{font-size:clamp(24px,7vw,36px);padding:6px 16px}
+.fx-pop.show{opacity:1;animation:popfx 1s cubic-bezier(.2,.9,.3,1.2) forwards}
+@keyframes popfx{0%{opacity:0;transform:translate(-50%,-50%) scale(.6)}22%{opacity:1;transform:translate(-50%,-50%) scale(1.08)}38%{transform:translate(-50%,-50%) scale(1)}78%{opacity:1;transform:translate(-50%,-50%) scale(1)}100%{opacity:0;transform:translate(-50%,-64%) scale(.96)}}
+.fx-p{position:absolute;left:50%;top:44%;width:9px;height:9px;border-radius:50%;background:hsl(var(--h) 90% 66%);animation:fxp .8s ease-out forwards}
+@keyframes fxp{from{opacity:1;transform:translate(-50%,-50%) rotate(var(--a)) translateY(0) scale(1)}to{opacity:0;transform:translate(-50%,-50%) rotate(var(--a)) translateY(calc(var(--d)*-1)) scale(.4)}}
+
+/* Nivel completado */
+.levelfx{position:fixed;inset:0;z-index:60;display:grid;place-items:center;padding:16px;background:rgba(3,4,12,.84);animation:lfbg .3s ease-out}
+.lf-card{position:relative;overflow:hidden;width:min(440px,100%);padding:30px 22px 22px;text-align:center;background:linear-gradient(160deg,#151a38,#0b0e20);border:2px solid rgba(167,139,250,.7);border-radius:24px;box-shadow:0 30px 90px rgba(0,0,20,.8);animation:lfin .5s cubic-bezier(.2,.9,.3,1.25)}
+.lf-star{position:relative;width:78px;height:78px;margin:0 auto 10px;display:grid;place-items:center;border-radius:50%;background:var(--grad);font-size:40px;box-shadow:0 0 0 8px rgba(139,92,246,.25),0 10px 30px rgba(79,100,255,.5);animation:lfstar 1.4s ease-in-out infinite}
+.lf-card h2{position:relative;font-size:clamp(24px,7vw,30px);font-weight:800;letter-spacing:-.6px}
+.lf-name{position:relative;margin-top:2px;color:var(--vio2);font-weight:600}
+.lf-pts{position:relative;display:flex;align-items:baseline;justify-content:center;gap:8px;margin:14px 0 6px}
+.lf-pts b{font-size:46px;font-weight:800;letter-spacing:-1px;background:linear-gradient(90deg,#7dd3fc,#c4b5fd);-webkit-background-clip:text;background-clip:text;color:transparent}
+.lf-pts span{color:var(--muted);font-size:14px}
+.lf-next{position:relative;margin-bottom:16px;padding:10px 12px;border-radius:12px;background:rgba(59,130,246,.15);border:1px solid rgba(96,165,250,.45);font-size:13.5px;font-weight:600}
+.lf-actions{position:relative;display:flex;flex-wrap:wrap;gap:8px}
+.lf-actions>button{flex:1 1 150px;min-height:50px;font-size:15px}
+.lf-timer{margin-top:12px;height:4px;border-radius:4px;background:rgba(255,255,255,.1);overflow:hidden}
+.lf-timer i{display:block;height:100%;transform-origin:left;background:var(--grad);animation:lftimer 6s linear forwards}
+.lf-conf{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.lf-conf i{position:absolute;top:-14px;left:var(--x);width:9px;height:14px;border-radius:2px;background:hsl(var(--h) 90% 62%);transform:rotate(var(--r));animation:lfconf 2.6s ease-in var(--dl) infinite}
+@keyframes lfbg{from{opacity:0}to{opacity:1}}
+@keyframes lfin{from{opacity:0;transform:translateY(24px) scale(.88)}to{opacity:1;transform:none}}
+@keyframes lfstar{50%{transform:scale(1.08)}}
+@keyframes lftimer{from{transform:scaleX(1)}to{transform:scaleX(0)}}
+@keyframes lfconf{from{transform:translateY(0) rotate(var(--r))}to{transform:translateY(520px) rotate(calc(var(--r) + 540deg))}}
+
+/* Pantallas táctiles: objetivos de al menos 44 px */
+@media(pointer:coarse){
+  button.chip,.chip{min-height:44px;height:44px}
+  select{min-height:44px}
+  .icon-btn{min-width:44px;min-height:44px}
+}
+
+/* Movimiento reducido: sin animaciones; los avisos de logro se muestran estáticos unos instantes */
+@media(prefers-reduced-motion:reduce){
+  *,::before,::after{animation:none!important;transition:none!important}
+  .fx-ring,.fx-p,.lf-conf{display:none}
+}   
